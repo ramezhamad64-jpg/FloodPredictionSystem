@@ -158,3 +158,5 @@ For live prediction, the app loads the required feature list directly from the L
 FEATURES = bundle["features"]
 
 This ensures the live input matches the trained LightGBM model.
+## Docker Image
+https://hub.docker.com/r/omarserhalllll22/floodsense
