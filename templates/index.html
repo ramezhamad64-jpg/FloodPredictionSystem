@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FloodSense Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e5e7eb; }
+    .layout { display: grid; grid-template-columns: 400px 1fr; min-height: 100vh; }
+    .sidebar { background: #111827; padding: 32px; border-right: 1px solid #334155; }
+    .main { padding: 32px 40px; }
+    h1 { font-size: 42px; margin: 0 0 28px; }
+    h2 { margin-top: 0; font-size: 28px; }
+    label { display: block; margin-top: 14px; margin-bottom: 8px; font-size: 18px; font-weight: bold; }
+    select, input, button { width: 100%; padding: 14px 18px; border-radius: 12px; border: none; font-size: 18px; }
+    button { margin-top: 22px; background: #38bdf8; color: #020617; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    button:hover { background: #0ea5e9; transform: translateY(-1px); }
+    .secondary-button { margin-top: 10px; background: #334155; color: #e5e7eb; }
+    .secondary-button:hover { background: #475569; }
+    .subtitle { color: #93c5fd; margin-bottom: 18px; }
+    .card { background: #1e293b; padding: 24px; border-radius: 20px; margin-bottom: 24px; box-shadow: 0 12px 30px rgba(0,0,0,.25); }
+    .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+    .metric-label { color: #93c5fd; font-size: 16px; margin-bottom: 12px; }
+    .metric { font-size: 32px; font-weight: bold; }
+    .danger { color: #fb7185; }
+    .safe { color: #4ade80; }
+    table { width: 100%; border-collapse: collapse; font-size: 17px; }
+    th, td { padding: 14px; border-bottom: 1px solid #334155; text-align: left; }
+    th { color: #e0f2fe; }
+    .small { color: #bfdbfe; font-size: 15px; line-height: 1.7; }
+    .chart-wrap { height: 360px; }
+    .warning { color: #fde68a; }
+    .info-box { background: #0f172a; border: 1px solid #334155; border-radius: 14px; padding: 12px; margin-top: 18px; color: #cbd5e1; font-size: 14px; line-height: 1.6; }
+    .mode-pill { display: inline-block; margin-top: 10px; padding: 8px 12px; border-radius: 999px; background: rgba(56,189,248,.12); color: #7dd3fc; font-size: 14px; font-weight: bold; }
+    .status-ok { color: #4ade80; }
+    .status-off { color: #fca5a5; }
+  </style>
+</head>
+
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <h1>FloodSense</h1>
+    <p class="subtitle">10-day river flow + flood risk dashboard</p>
+
+    <label>River ID from Testing Dataset</label>
+    <select id="riverSelect">
+      {% for r in rivers %}
+        <option value="{{ r }}">{{ r }}</option>
+      {% endfor %}
+    </select>
+
+    <label>Live USGS Site ID</label>
+    <input type="text" id="customRiver" placeholder="Optional: 01434000" oninput="updateLiveMode()">
+    <button type="button" class="secondary-button" id="clearLiveButton" onclick="clearLiveRiver()" style="display:none;">Clear live ID</button>
+    <div class="mode-pill" id="modePill">Mode: processed dataset river</div>
+
+    <label>Forecast From Date</label>
+    <input type="date" id="selectedDate" min="{{ min_date }}" max="{{ max_date }}" value="{{ max_date }}" />
+
+    <label>Regression Model</label>
+    <select id="modelSelect">
+      {% for model in model_options %}
+        <option value="{{ model.value }}" {% if not model.available %}disabled{% endif %}>
+          {{ model.label }} - {{ model.note }}
+        </option>
+      {% endfor %}
+    </select>
+
+    <button onclick="predict()">Predict</button>
+
+    <div class="info-box">
+      Leave Live USGS Site ID empty to choose any regression model on the testing dataset. Enter a USGS site ID
+      to run live prediction in this same dashboard; live mode uses LightGBM.
+    </div>
+
+    <div class="card" style="margin-top:24px;">
+      <h2>Loaded Artifacts</h2>
+      {% for k, v in artifact_status.items() %}
+        <p class="small">
+          <b>{{ k }}:</b>
+          <span class="{% if v == 'loaded' or v == 'applied' %}status-ok{% elif 'missing/error' in v %}status-off{% endif %}">{{ v }}</span>
+        </p>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="grid4">
+      <div class="card"><div class="metric-label">Flood Probability</div><div class="metric" id="floodProb">--</div></div>
+      <div class="card"><div class="metric-label">Flood Alert</div><div class="metric" id="floodAlert">--</div></div>
+      <div class="card"><div class="metric-label">Threshold</div><div class="metric" id="threshold">0.30</div></div>
+      <div class="card"><div class="metric-label">Input Date Used</div><div class="metric" id="inputDate" style="font-size:24px;">--</div></div>
+    </div>
+
+    <div class="card">
+      <h2>10-Day Streamflow Forecast</h2>
+      <div class="chart-wrap"><canvas id="forecastChart"></canvas></div>
+    </div>
+
+    <div class="grid4">
+      <div class="card"><div class="metric-label">MAE</div><div class="metric" id="maeMetric">N/A</div></div>
+      <div class="card"><div class="metric-label">RMSE</div><div class="metric" id="rmseMetric">N/A</div></div>
+      <div class="card"><div class="metric-label">Model</div><div class="metric" id="modelUsed" style="font-size:22px;">--</div></div>
+      <div class="card"><div class="metric-label">Comparison</div><div class="metric" id="comparisonStatus" style="font-size:22px;">--</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Classification Model Evaluation</h2>
+      <div class="grid4">
+        <div><div class="metric-label">Precision</div><div class="metric" id="precisionMetric">--</div></div>
+        <div><div class="metric-label">Recall</div><div class="metric" id="recallMetric">--</div></div>
+        <div><div class="metric-label">F1-score</div><div class="metric" id="f1Metric">--</div></div>
+        <div><div class="metric-label">ROC-AUC</div><div class="metric" id="rocMetric">--</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Prediction Table</h2>
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Predicted Flow</th><th>Observed Flow</th><th>Difference</th></tr>
+        </thead>
+        <tbody id="predictionTable"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Warnings / Notes</h2>
+      <ul id="warnings" class="small warning"><li>No prediction yet.</li></ul>
+    </div>
+  </main>
+</div>
+
+<script>
+let chart = null;
+
+function updateLiveMode() {
+  const customRiver = document.getElementById("customRiver").value.trim();
+  const modelSelect = document.getElementById("modelSelect");
+  const pill = document.getElementById("modePill");
+
+  if (customRiver.length > 0) {
+    modelSelect.value = "lightgbm";
+    modelSelect.disabled = true;
+    pill.innerText = "Mode: new live USGS river";
+    document.getElementById("clearLiveButton").style.display = "block";
+  } else {
+    modelSelect.disabled = false;
+    pill.innerText = "Mode: processed dataset river";
+    document.getElementById("clearLiveButton").style.display = "none";
+  }
+}
+
+function clearLiveRiver() {
+  document.getElementById("customRiver").value = "";
+  updateLiveMode();
+}
+
+function fmtMetric(x) {
+  if (x === null || x === undefined || !Number.isFinite(Number(x))) return "N/A";
+  return Number(x).toFixed(3);
+}
+
+function fmtFlow(x) {
+  if (x === null || x === undefined || !Number.isFinite(Number(x))) return "N/A";
+  return Number(x).toFixed(2);
+}
+
+function cleanSeries(values) {
+  return (values || []).map(x => Number.isFinite(Number(x)) ? Number(x) : null);
+}
+
+async function predict() {
+  const riverId = document.getElementById("riverSelect").value;
+  const customRiver = document.getElementById("customRiver").value.trim();
+  const finalRiverId = customRiver || riverId;
+  const selectedDate = document.getElementById("selectedDate").value;
+  const modelChoice = customRiver.length > 0 ? "lightgbm" : document.getElementById("modelSelect").value;
+
+  const response = await fetch("/predict", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      river_id: finalRiverId,
+      selected_date: selectedDate,
+      model_choice: modelChoice,
+      use_live_usgs: customRiver.length > 0
+    })
+  });
+
+  const data = await response.json();
+
+  if (data.error) {
+    alert(data.error);
+    return;
+  }
+
+  const floodProbability = Number(data.flood_probability);
+  document.getElementById("floodProb").innerText =
+    Number.isFinite(floodProbability) ? (floodProbability * 100).toFixed(1) + "%" : "N/A";
+
+  const alertBox = document.getElementById("floodAlert");
+  alertBox.innerText = data.flood_alert ? "YES" : "NO";
+  alertBox.className = data.flood_alert ? "metric danger" : "metric safe";
+
+  document.getElementById("threshold").innerText = data.threshold;
+  document.getElementById("inputDate").innerText = data.selected_input_date;
+  document.getElementById("maeMetric").innerText = fmtFlow(data.mae);
+  document.getElementById("rmseMetric").innerText = fmtFlow(data.rmse);
+  document.getElementById("modelUsed").innerText = data.model_used;
+
+  const predictedSeries = cleanSeries(data.predicted_flows);
+  const observedSeries = cleanSeries(data.observed_flows);
+  const hasObserved = observedSeries.some(x => x !== null);
+
+  document.getElementById("comparisonStatus").innerText = hasObserved ? "Observed available" : "Forecast only";
+
+  const cm = data.classifier_metrics || {};
+  document.getElementById("precisionMetric").innerText = fmtMetric(cm.precision);
+  document.getElementById("recallMetric").innerText = fmtMetric(cm.recall);
+  document.getElementById("f1Metric").innerText = fmtMetric(cm.f1);
+  document.getElementById("rocMetric").innerText =
+  cm.roc_auc === null || cm.roc_auc === undefined || !Number.isFinite(Number(cm.roc_auc))
+    ? "N/A"
+    : (Number(cm.roc_auc) * 100).toFixed(2) + "%";
+  const rows = data.prediction_dates.map((d, i) => {
+    const pred = data.predicted_flows[i];
+    const obs = data.observed_flows ? data.observed_flows[i] : null;
+    const diff = data.differences ? data.differences[i] : null;
+
+    return `
+      <tr>
+        <td>${d}</td>
+        <td>${fmtFlow(pred)}</td>
+        <td>${fmtFlow(obs)}</td>
+        <td>${fmtFlow(diff)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  document.getElementById("predictionTable").innerHTML = rows;
+  document.getElementById("warnings").innerHTML = data.warnings.map(w => `<li>${w}</li>`).join("");
+
+  const ctx = document.getElementById("forecastChart");
+  if (chart) chart.destroy();
+
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: data.prediction_dates,
+      datasets: [
+        { label: "Predicted Flow", data: predictedSeries, borderWidth: 3, tension: 0.35 },
+        ...(hasObserved ? [
+          { label: "Observed Flow", data: observedSeries, borderWidth: 3, tension: 0.35 }
+        ] : [])
+      ]
+    },
+    options: {
+      maintainAspectRatio: false,
+      responsive: true,
+      plugins: { legend: { labels: { color: "#e5e7eb" } } },
+      scales: {
+        x: { ticks: { color: "#e5e7eb" }, grid: { color: "#334155" } },
+        y: { ticks: { color: "#e5e7eb" }, grid: { color: "#334155" } }
+      }
+    }
+  });
+}
+
+updateLiveMode();
+</script>
+</body>
+</html>
